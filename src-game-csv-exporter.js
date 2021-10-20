@@ -13,6 +13,8 @@ program
 	.requiredOption('-o, --output-dir <outputDir>', 'Directory in which to place output files.')
 	.option('-v, --breakout-variables', 'If true, leaderboards will be subdivided into each allowed combination of category variables.')
 	.option('-d, --debug', 'Print verbose debug messages while running.')
+	.option('-a, --include-unverified-runs', 'Includes runs of any status (by default, only verified runs are dumped).')
+	.option('-h, --include-run-history', 'Includes all obsolete runs in the dump.')
 	.option('-f, --output-format <format>', 'Specifies the format for the output data dump. Allowed values are "csv" and "json" (default is "csv").')
 	.parse(process.argv);
 
@@ -115,7 +117,12 @@ async function run() {
 			status: runResponseObj.status.status,
 			variables: runResponseObj.values || {}
 		};
-		if (!runObj.status || runObj.status === 'rejected') return null;
+		if (
+			!runObj.status ||
+			(!popts.includeUnverifiedRuns && (runObj.status !== 'verified'))
+		) {
+			return null;
+		}
 
 		if (runResponseObj.times && runResponseObj.times.primary_t) {
 			let unresolvedTime = Math.floor(runResponseObj.times.primary_t);
@@ -276,47 +283,72 @@ async function run() {
 	// For each leaderboard, remove obsolete runs and sort by time
 	for (let lbId in leaderboards) {
 		let lbObj = leaderboards[lbId];
-		let bestRunByUserId = {};
+		let runsByUserId = {};
 		for (let run of lbObj.runs) {
 			if (!run.timeSeconds || !run.player || !run.player.id) continue;
-			if (!bestRunByUserId[run.player.id] || (bestRunByUserId[run.player.id].timeSeconds > run.timeSeconds)) {
-				bestRunByUserId[run.player.id] = run;
-			}
+			if (!runsByUserId[run.player.id]) runsByUserId[run.player.id] = [];
+			runsByUserId[run.player.id].push(run);
 		}
-		lbObj.runs = Object.values(bestRunByUserId).sort((a, b) => a.timeSeconds - b.timeSeconds);
-		for (let i = 0; i < lbObj.runs.length; i++) {
+		let lbEntries = [];
+		for (let userId in runsByUserId) {
+			let userRuns = runsByUserId[userId].sort((a, b) => a.timeSeconds - b.timeSeconds);
+			if (userRuns.length === 0) continue;
+			let entry = userRuns[0];
+			if (popts.includeRunHistory) {
+				if (userRuns.length > 1) {
+					entry.obsoleteRuns = userRuns.slice(1);
+				} else {
+					entry.obsoleteRuns = [];
+				}
+			}
+			lbEntries.push(entry);
+		}
+		lbEntries.sort((a, b) => a.timeSeconds - b.timeSeconds);
+		for (let i = 0; i < lbEntries.length; i++) {
 			if (i === 0) {
-				lbObj.runs[i].rank = 1;
-			} else if (lbObj.runs[i].timeSeconds === lbObj.runs[i - 1].timeSeconds) {
-				lbObj.runs[i].rank = lbObj.runs[i - 1].rank;
+				lbEntries[i].rank = 1;
+			} else if (lbEntries[i].timeSeconds === lbEntries[i - 1].timeSeconds) {
+				lbEntries[i].rank = lbEntries[i - 1].rank;
 			} else {
-				lbObj.runs[i].rank = i + 1;
+				lbEntries[i].rank = i + 1;
 			}
 		}
+		lbObj.runs = lbEntries;
 	}
 
 
 	if (outputFormat === 'csv') {
+
+		function makeCsvLine(run) {
+			return {
+				rank: run.rank,
+				player: run.player && run.player.name,
+				time: run.time,
+				platform: run.platform,
+				videos: run.videos && run.videos.join(', '),
+				submitTime: run.submitTime,
+				status: run.status,
+				verifyTime: run.verifyTime,
+				verifier: run.verifier,
+				comment: run.comment,
+				variables: (Object.keys(run.variables).length > 0) ? JSON.stringify(run.variables) : ''
+			};
+		}
+
 		for (let lbId in leaderboards) {
 			let lbObj = leaderboards[lbId];
 			if (!lbObj.runs || lbObj.runs.length === 0) continue;
 			let filename = path.resolve(outputDir, `${gameAbbrev}_${lbObj.name.toLowerCase().replace(/[\s\/\_-]+/g, '_')}.csv`);
-			await zstreams.fromArray(lbObj.runs)
-				.through((run) => {
-					return {
-						rank: run.rank,
-						player: run.player && run.player.name,
-						time: run.time,
-						platform: run.platform,
-						videos: run.videos && run.videos.join(', '),
-						submitTime: run.submitTime,
-						status: run.status,
-						verifyTime: run.verifyTime,
-						verifier: run.verifier,
-						comment: run.comment,
-						variables: (Object.keys(run.variables).length > 0) ? JSON.stringify(run.variables) : ''
-					};
-				})
+			let csvLines = [];
+			for (let run of lbObj.runs) {
+				csvLines.push(makeCsvLine(run));
+				if (run.obsoleteRuns) {
+					for (let obsoleteRun of run.obsoleteRuns) {
+						csvLines.push(makeCsvLine(obsoleteRun));
+					}
+				}
+			}
+			await zstreams.fromArray(csvLines)
 				.pipe(new CsvWrite([
 					'rank', 'player', 'time', 'platform', 'videos', 'submitTime', 'status', 'verifyTime', 'verifier', 'comment', 'variables'
 				]))
