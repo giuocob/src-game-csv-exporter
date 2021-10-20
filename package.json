@@ -1,0 +1,15 @@
+{
+  "name": "src-game-csv-exporter",
+  "version": "1.0.0",
+  "description": "Uses the SRC REST API to dump game leaderboard data to CSV",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^8.2.0",
+    "got": "^11.8.2",
+    "mkdirp": "^1.0.4",
+    "pasync": "^2.0.2",
+    "zstreams": "^5.0.0",
+    "zstreams-csv-write": "^1.0.0"
+  }
+}
